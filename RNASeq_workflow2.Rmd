@@ -1,0 +1,214 @@
+---
+title: "RNA-seq of oral carcinoma vs matched normal tissue"
+source: case study 4.2 from EdgeR user's guide
+output:
+  html_document:
+    df_print: paged
+---
+
+1. Introduction
+This section provides a detailed analysis of data from a paired design RNA-seq experiment,
+featuring oral squamous cell carcinomas and matched normal tissue from three patients.
+The aim of the analysis is to detect genes differentially expressed between tumor and normal
+tissue, adjusting for any differences between the patients. This provides an example of the
+GLM capabilities of edgeR.
+RNA was sequenced on an Applied Biosystems SOLiD System 3.0 and reads mapped to
+the UCSC hg18 reference genome. Read counts, summarised at the level of refSeq
+transcripts, are available in Table S1 of Tuch et al.
+
+1.2. Reading in the data
+The read counts for the six individual libraries are stored in one tab-delimited file. To make
+this file, we downloaded Table S1 from Tuch et al., deleted some unnecessary columns
+and edited the column headings slightly:
+
+```{r}
+setwd('C:/Users/patipark/Dropbox/Systems BiologyLearningTools/SIPM509-RNAseq')
+rawdata <- read.delim("TableS1.txt", check.names = FALSE, stringsAsFactors = FALSE)
+```
+
+Modify data table
+```{r}
+require(tidyverse)
+require(limma)
+
+# add column headers
+colnames(rawdata)[c(1,2,3)] <- c('RefSeqID','Symbol','NbrOfExons')
+# remove first two rows
+rawdata <- rawdata[-c(1,2),c(1:9)] 
+# convert 'char' to 'double'
+raw2 <- apply(rawdata[,c(3:9)], 2, as.numeric) %>% as.data.frame()
+# coerce columns into a table
+rawdata <- cbind(rawdata[,c(1,2)],raw2)
+```
+
+For easy manipulation, we put the data into a DGEList object:
+```{r}
+require(edgeR)
+y <- DGEList(counts = rawdata[,4:9], 
+             genes = rawdata[,1:3])
+```
+
+1.3. Annotation
+The study by Tuch et al. [39] was undertaken a few years ago, so not all of the RefSeq IDs
+provided by match RefSeq IDs currently in use. We retain only those transcripts with IDs in
+the current NCBI annotation, which is provided by the org.HS.eg.db package:
+```{r}
+require(org.Hs.eg.db)
+idfound <- y$genes$RefSeqID %in% mappedRkeys(org.Hs.egREFSEQ)
+y <- y[idfound,]
+dim(y)
+```
+
+We add Entrez Gene IDs to the annotation:
+```{r}
+egREFSEQ <- toTable(org.Hs.egREFSEQ)
+head(egREFSEQ)
+```
+
+```{r}
+# match RefSeqID from y to accession number from egREFSEQ
+m <- match(y$genes$RefSeqID, egREFSEQ$accession)
+# add gene id from egREFSEQ to y as EntrezGEne
+y$genes$EntrezGene <- egREFSEQ$gene_id[m]
+
+head(y$genes$EntrezGene)
+```
+
+Now use the Entrez Gene IDs to update the gene symbols:
+```{r}
+egSYMBOL <- toTable(org.Hs.egSYMBOL)
+head(egSYMBOL)
+```
+
+```{r}
+m <- match(y$genes$EntrezGene, egSYMBOL$gene_id)
+y$genes$Symbol <- egSYMBOL$symbol[m]
+head(y$genes)
+```
+
+1.4. Filter and normalization
+Different RefSeq transcripts for the same gene symbol count predominantly the same reads.
+So we keep one transcript for each gene symbol. We choose the transcript with highest
+overall count:
+```{r}
+o <- order(rowSums(y$counts), decreasing=TRUE)
+y <- y[o,]
+d <- duplicated(y$genes$Symbol)
+y <- y[!d,]
+nrow(y)
+```
+
+Normally we would also filter lowly expressed genes. For this data, all transcripts already
+have at least 50 reads for all samples of at least one of the tissues types.
+Recompute the library sizes:
+```{r}
+y$samples$lib.size <- colSums(y$counts)
+```
+
+Use Entrez Gene IDs as row names:
+```{r}
+rownames(y$counts) <- rownames(y$genes) <- y$genes$EntrezGene
+y$genes$EntrezGene <- NULL
+```
+
+TMM normalization is applied to this dataset to account for compositional difference between
+the libraries.
+```{r}
+y <- calcNormFactors(y)
+y$samples
+```
+
+1.5. Data normalization
+The first step of an analysis should be to examine the samples for outliers and for other
+relationships. The function plotMDS produces a plot in which distances between samples
+correspond to leading biological coefficient of variation (BCV) between those samples:
+
+```{r}
+plotMDS(y)
+```
+
+In the plot, dimension 1 separates the tumor from the normal samples, while dimension 2
+roughly corresponds to patient number. This confirms the paired nature of the samples. The
+tumor samples appear more heterogeneous than the normal samples.
+
+1.6. The design matrix
+Before we fit negative binomial GLMs, we need to define our design matrix based on the
+experimental design. Here we want to test for differential expression between tumour and
+normal tissues within patients, i.e. adjusting for differences between patients. In statistical
+terms, this is an additive linear model with patient as the blocking factor:
+```{r}
+Patient <- factor(c(8,8,33,33,51,51))
+Tissue <- factor(c("N","T","N","T","N","T"))
+data.frame(Sample=colnames(y),Patient,Tissue)
+```
+
+```{r}
+design <- model.matrix(~Patient+Tissue)
+rownames(design) <- colnames(y)
+design
+```
+This sort of additive model is appropriate for paired designs, or experiments with batch effects.
+
+1.7 Estimating the dispersion
+We estimate the NB dispersion for the dataset.
+```{r}
+y <- estimateDisp(y, design, robust=TRUE)
+y$common.dispersion
+```
+The square root of the common dispersion gives the coefficient of variation of biological
+variation. Here the common dispersion is found to be 0.159, so the coefficient of biological
+variation is around 0.4.
+The dispersion estimates can be viewed in a BCV plot:
+```{r}
+plotBCV(y)
+```
+
+1.8. Differential expression
+Now proceed to determine differentially expressed genes. Fit genewise glms:
+```{r}
+fit <- glmFit(y, design)
+```
+
+Conduct likelihood ratio tests for tumour vs normal tissue differences and show the top genes:
+```{r}
+lrt <- glmLRT(fit)
+topTags(lrt)
+```
+
+Note that glmLRT has conducted a test for the last coefficient in the linear model, which we
+can see is the tumor vs normal tissue effect:
+```{r}
+colnames(design)
+```
+
+The genewise tests are for tumor vs normal differential expression, adjusting for baseline
+differences between the three patients. The tests can be viewed as analogous to paired
+t-tests. The top DE tags have tiny p-values and FDR values, as well as large fold changes.
+Here's a closer look at the counts-per-million in individual samples for the top genes:
+```{r}
+o <- order(lrt$table$PValue)
+cpm(y)[o[1:10],]
+```
+
+The total number of differentially expressed genes at 5% FDR is given by:
+```{r}
+summary(decideTests(lrt))
+```
+
+Plot log-fold change against log-counts per million, with DE genes highlighted:
+```{r}
+plotMD(lrt)
+abline(h = c(-1,1), col = 'blue')
+```
+
+The blue lines indicate 2-fold changes.
+
+1.9. Gene ontology analysis
+We perform a gene ontology analysis focusing on the ontology of biological process (BP).
+The genes up-regulated in the tumors tend to be associated with cell differentiation, cell
+migration and tissue morphogenesis:
+```{r}
+go <- goana(lrt)
+topGO(go, ont = 'BP', sort = 'Up', n = 30, truncate = 30)
+```
+

@@ -1,0 +1,188 @@
+---
+title: "Download RNA expression data from microarray experiment"
+output:
+  html_document:
+    df_print: paged
+---
+
+Download required packages
+```{r}
+# Please install these packages before running the codes
+# install.packages(c('Biobase','GEOquery','limma'))
+
+require(Biobase)
+require(GEOquery)
+require(limma)
+require(tidyverse)
+```
+
+R scripts for sample selection from GEO database.
+1. Download GSE from database using GSE_ID.
+```{r}
+# load series and platform data from GEO
+gset <- getGEO("GSE32225", GSEMatrix = TRUE, AnnotGPL = FALSE)
+# gset file will be temporarily stored in your computer
+# call gset information
+gset
+```
+
+2. There may be many gene sets in one GSE file, please make sure that you select the correct one.
+```{r}
+# check length of gset
+if (length(gset) > 1) {
+  idx <- grep("GPL8432", attr(gset, "names")) 
+} else {
+  idx <- 1
+}
+# get desired gene set based on index
+gset <- gset[[idx]]
+
+# make proper column names to match toptable
+# this function requires Biobase package.
+# fvarLabels will add features and metadata to gset.
+fvarLabels(gset) <- make.names(fvarLabels(gset))
+```
+
+3. Select samples to be analyzed.
+```{r}
+# group names for all samples
+# 1 = Tumor, 0 = Normal
+gsms <- paste0("XXXX111XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX111XX0",
+        "00XXX")
+# create empty vector
+sml <- c()
+# add symbols to index vector
+for (i in 1:nchar(gsms)) { 
+  sml[i] <- substr(gsms,i,i) 
+}
+# eliminate samples marked as "X"
+sel <- which(sml != "X")
+sml <- sml[sel]
+# only selected columns will be subset from gset
+gset <- gset[ ,sel]
+```
+
+4. Normalize gene expression values
+```{r}
+# log2 transform
+# this function requires Biobase package.
+ex <- exprs(gset)
+# look at distribution of gene expression
+hist(ex, 
+     main = 'Histogram of gene expr values')
+```
+
+Display original data in box-plot format
+```{r}
+# order samples by group
+ex <- exprs(gset)[ , order(sml)]
+# reorder sml
+sml <- sml[order(sml)]
+# add factor level
+fl <- as.factor(sml)
+# add labels
+labels <- c("Normal","Tumor")
+
+# set parameters and draw the plot
+# define color codes
+palette(c("#dfeaf4","#f4dfdf", "#AABBCC"))
+# set dimension of figure
+dev.new(width = 4 + dim(gset)[[2]]/5, height = 6)
+# set figure's margins
+par(mar = c(2+round(max(nchar(sampleNames(gset)))/2),4,2,1))
+# create name of title
+title <- paste ("GSE32225", '/', annotation(gset), " selected samples", sep ='')
+# draw boxplot
+boxplot(ex, boxwex = 0.6, notch = TRUE, main = title, outline = FALSE, las = 2, col = fl,
+        ylab = expression(expr~values))
+# add legend
+# legend("topleft", labels, fill=palette(), bty="n")
+```
+
+Calculate quantile of gene expression values
+```{r}
+# calculate quantile of gene expression values
+qx <- as.numeric(quantile(ex, c(0., 0.25, 0.5, 0.75, 0.99, 1.0), na.rm = TRUE))
+qx
+```
+
+Apply log2 transformation to gene expression values
+```{r}
+# check boolean of each quantile 
+LogC <- (qx[5] > 100) ||
+  (qx[6]-qx[1] > 50 && qx[2] > 0) ||
+  (qx[2] > 0 && qx[2] < 1 && qx[4] > 1 && qx[4] < 2)
+# if LogC is TRUE
+if (LogC) { 
+  ex[which(ex <= 0)] <- NaN # any expression value <= 0 is labeled as NaN
+  exprs(gset) <- log2(ex) 
+  } # apply log2 to expression values
+# look at data distribution again
+hist(exprs(gset),
+     main = 'Histogram of log2(gene expr values)')
+```
+
+Display log2-transformed data in box-plot format
+```{r}
+# order samples by group
+ex <- exprs(gset)[ , order(sml)]
+# reorder sml
+sml <- sml[order(sml)]
+# add factor level
+fl <- as.factor(sml)
+# add labels
+labels <- c("Normal","Tumor")
+
+# set parameters and draw the plot
+# define color codes
+palette(c("#dfeaf4","#f4dfdf", "#AABBCC"))
+# set dimension of figure
+dev.new(width = 4 + dim(gset)[[2]]/5, height = 6)
+# set figure's margins
+par(mar = c(2+round(max(nchar(sampleNames(gset)))/2),4,2,1))
+# create name of title
+title <- paste ("GSE32225", '/', annotation(gset), " selected samples", sep ='')
+# draw boxplot
+boxplot(ex, boxwex = 0.6, notch = TRUE, main = title, outline = FALSE, las = 2, col = fl,
+        ylab = expression(log[2]~expr~values))
+# add legend
+# legend("topleft", labels, fill=palette(), bty="n")
+```
+
+5. Create a linear model and fit data to the model
+```{r}
+# set up the data and proceed with analysis
+sml <- paste("G", sml, sep = "")    # set group names
+fl <- as.factor(sml)
+# define group names for the model
+gset$description <- fl
+# create a design model matrix
+design <- model.matrix(~ description + 0, gset)
+# add factor level to samples
+colnames(design) <- levels(fl)
+# fit data using lmFit function from limma package
+fit <- lmFit(gset, design)
+# construct a contrast matrix
+cont.matrix <- makeContrasts(G1-G0, levels = design)
+# compute estimated coeffs and standard errors 
+fit2 <- contrasts.fit(fit, cont.matrix)
+# calculate statistics
+fit2 <- eBayes(fit2, 0.01)
+# build table
+tT <- topTable(fit2, 
+               adjust = "fdr", 
+               sort.by = "B", 
+               number = 250)
+
+tT <- subset(tT, select = c("ID","Symbol","adj.P.Val","P.Value","t","B","logFC","GI","SEQUENCE","GB_ACC")) %>% as.data.frame()
+
+head(tT)
+```
+
+```{r}
+setwd('C:/Users/patipark/Dropbox/Systems BiologyLearningTools/SIPM509-RNAseq')
+write.csv(tT, file = 'RNA-seq_report.csv', row.names = FALSE, quote = FALSE)
+```
+
